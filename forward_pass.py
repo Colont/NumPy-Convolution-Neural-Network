@@ -1,5 +1,5 @@
 import numpy as np
-#from mnist_data import main  # your MNIST loader
+
 
 def generate_kernel(kernel_size):
     """Randomly initialize a convolution kernel"""
@@ -86,7 +86,9 @@ def forward_pass(image, kernels, weights, biases):
     vals = {
         "z1": conv1, "a1": ReLU1, "p1": pooled1,
         "z2": conv2, "a2": ReLU2, "p2": pooled2,
-        "flattened": flattened
+        "flattened": flattened,
+        "input_to_conv1": image, 
+        "input_to_conv2": pooled1 
     }
 
     return prob, vals
