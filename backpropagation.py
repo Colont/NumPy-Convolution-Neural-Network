@@ -1,143 +1,114 @@
 import numpy as np
+from numpy.lib.stride_tricks import sliding_window_view
 from forward_pass import *  # Import all forward pass functions
+
 
 def backpropagation(probabilities, vals, labels, weights, kernels):
     """
-    Perform backpropagation through the network with mathematical explanations
-    
-    Network architecture:
+    Vectorized backpropagation for:
     Conv1 → ReLU → MaxPool1 → Conv2 → ReLU → MaxPool2 → Flatten → Dense → Softmax
     """
-    n = len(labels)
-    conv1 = vals['z1']  # Output of first convolution (before ReLU)
-    conv2 = vals['z2']  # Output of second convolution (before ReLU)
+    batch_size = len(labels)
     
-    # =====================================================================
-    # 1. Softmax Gradient (Cross-Entropy Loss derivative)
-    # ∂L/∂z = p_i - y_i (where p_i is predicted prob, y_i is true label)
-    # =====================================================================
+
+    # 1. Softmax gradient
+    print('good')
     y = np.zeros_like(probabilities)
-    y[np.arange(n), labels] = 1  # One-hot encode true labels
-    dL_dsoftinputs = probabilities - y  # Gradient at softmax layer
-
-    # =====================================================================
-    # 2. Dense Layer Gradients
-    # ∂L/∂W = a_{L-1}^T · ∂L/∂z_L (where a is activation, z is pre-activation)
-    # ∂L/∂b = sum(∂L/∂z_L) across batch
-    # =====================================================================
-    flattened_input = vals['flattened']  # Output from MaxPool2 (flattened)
-    dL_dW = flattened_input.T @ dL_dsoftinputs  # Gradient for dense weights
-    dL_db = np.sum(dL_dsoftinputs, axis=0, keepdims=True)  # Gradient for biases
-
-    # =====================================================================
-    # 3. Flatten Layer Gradient
-    # ∂L/∂a_{L-1} = ∂L/∂z_L · W^T
-    # =====================================================================
-    dL_dflattened = dL_dsoftinputs @ weights.T
+    y[np.arange(batch_size), labels] = 1
+    dL_dsoft = probabilities - y  # (batch, n_classes)
     
-    # =====================================================================
-    # 4. MaxPool2 Gradient (Backprop through max pooling)
-    # Only the max position in each window receives gradient
-    # ∂L/∂a_{pool} = upsample(∂L/∂a_{next}) with zeros except at max positions
-    # =====================================================================
-    pooled_2 = vals['p2']
-    dL_dpool2 = dL_dflattened.reshape(pooled_2.shape)  # Reshape to match pool output
-   
-    # Initialize gradient for conv2 output (before pooling)
-    dL_dconv2 = np.zeros_like(conv2)
-    pool_size = 2  
-    batch_size, h, w = conv2.shape
-
-    for b in range(batch_size):
-        for i in range(0, h, pool_size):
-            for j in range(0, w, pool_size):
-                window = conv2[b, i:i+pool_size, j:j+pool_size]
-                max_idx = np.unravel_index(np.argmax(window), window.shape)
-                # Only the max position gets gradient
-                dL_dconv2[b, i + max_idx[0], j + max_idx[1]] = dL_dpool2[b, i//pool_size, j//pool_size]
+    # 2. Dense layer gradients
+    print('good')
+    flattened = vals['flattened']  # (batch, flatten_dim)
+    dW = flattened.T @ dL_dsoft
+    db = np.sum(dL_dsoft, axis=0, keepdims=True)
     
-    # =====================================================================
-    # 5. ReLU Gradient for Conv2
-    # ∂L/∂z = ∂L/∂a * (z > 0) where a = ReLU(z)
-    # =====================================================================
-    dL_dconv2_pre_relu = dL_dconv2 * (conv2 > 0)  # Gradient before ReLU
 
-    # =====================================================================
-    # 6. Kernel2 Gradient (Conv2 weights)
-    # ∂L/∂K2 = a1 ∗ ∂L/∂z2 (valid cross-correlation)
-    # Where ∗ is valid cross-correlation between input and gradient
-    # =====================================================================
-    dL_dkernel2 = np.zeros_like(kernels[1])
-    conv2_input = vals['a1']  # Output from pool1 (after ReLU)
-    kernel_size = kernels[1].shape[0]
-
-    for b in range(batch_size):
-        for i in range(h - kernel_size + 1):
-            for j in range(w - kernel_size + 1):
-                window = conv2_input[b, i:i+kernel_size, j:j+kernel_size]
-                dL_dkernel2 += window * dL_dconv2_pre_relu[b, i, j]
+    # 3. Flatten layer backward
+    print('good')
+    d_flat = dL_dsoft @ weights.T  # (batch, pooled2_h * pooled2_w)
+    pooled2 = vals['p2']
+    d_pool2 = d_flat.reshape(pooled2.shape)  # match MaxPool2 output shape
     
-    # Average gradient over batch
-    dL_dkernel2 /= batch_size
+    # 4. MaxPool2 backward
+    # MaxPool2 indices
+    conv2 = vals['z2']
+    pool_size = 2
+    b, h, w = conv2.shape
+    ph, pw = h // pool_size, w // pool_size
+    windows2 = conv2.reshape(b, ph, pool_size, pw, pool_size)
+    flat_windows2 = windows2.reshape(b, ph, pw, pool_size*pool_size)
+    max_idx2 = np.argmax(flat_windows2, axis=-1)
+    max_h2 = max_idx2 // pool_size
+    max_w2 = max_idx2 % pool_size
 
-    # =====================================================================
-    # 7. Gradient for Pool1 Output (Backprop through Conv2)
-    # ∂L/∂a1 = full_convolution(∂L/∂z2, rot180(K2))
-    # This is a transposed convolution operation
-    # =====================================================================
-    dL_dpool1 = np.zeros_like(conv2_input)
-    kernel2 = kernels[1]
+    d_conv2 = np.zeros_like(conv2)
+    batch_idx = np.repeat(np.arange(b), ph*pw)
+    h_idx_flat = ((np.arange(ph)[:, None]*pool_size) + max_h2).ravel()
+    w_idx_flat = ((np.arange(pw)[None, :]*pool_size) + max_w2).ravel()
+    flat_idx = np.ravel_multi_index((batch_idx, h_idx_flat, w_idx_flat), conv2.shape)
+    d_conv2.ravel()[flat_idx] = d_pool2.ravel()
 
-    for b in range(batch_size):
-        for i in range(h):
-            for j in range(w):
-                # Spread gradient through kernel (transposed conv)
-                dL_dpool1[b, i:i+kernel_size, j:j+kernel_size] += \
-                    kernel2 * dL_dconv2_pre_relu[b, i, j]
-                
-    # =====================================================================
-    # 8. MaxPool1 Gradient (Same as MaxPool2)
-    # =====================================================================
-    dL_dconv1 = np.zeros_like(conv1)
-    batch_size, h_p1, w_p1 = conv1.shape
+    # 5. ReLU2 backward
+    print('good')
+    d_conv2_pre = d_conv2 * (conv2 > 0)
     
-    for b in range(batch_size):
-        for i in range(0, h_p1, pool_size):
-            for j in range(0, w_p1, pool_size):
-                window = conv1[b, i:i+pool_size, j:j+pool_size]
-                max_idx = np.unravel_index(np.argmax(window), window.shape)
-                dL_dconv1[b, i + max_idx[0], j + max_idx[1]] = dL_dpool1[b, i//pool_size, j//pool_size]
 
-    # =====================================================================
-    # 9. ReLU Gradient for Conv1
-    # =====================================================================
-    dL_dconv1_pre_relu = dL_dconv1 * (conv1 > 0)
+    # 6. Kernel2 gradient (conv2 weights)
+    print('good')
+    a1 = vals['a1']  # input to conv2 (after pool1)
+    k2 = kernels[1]
+    k_size2 = k2.shape[0]
+    windows2 = sliding_window_view(a1, (k_size2, k_size2), axis=(1,2))
+    dK2 = np.einsum('bxyij,bxy->ij', windows2, d_conv2_pre) / batch_size
+    
+ 
+    # 7. Transposed convolution for pool1
+    # Backprop through conv2 to pool1
+    print('good')
+    pad = k_size2 - 1
+    padded_grad = np.pad(d_conv2_pre, ((0,0),(pad,pad),(pad,pad)), mode='constant')
+    windows_pad = sliding_window_view(padded_grad, (k_size2, k_size2), axis=(1,2))
+    d_pool1 = np.einsum('bhwij,ij->bhw', windows_pad, k2)
+    
+ 
+    # 8. MaxPool1 backward
+    conv1 = vals['z1']
+    b, h1, w1 = conv1.shape
+    ph1, pw1 = h1 // pool_size, w1 // pool_size
+    reshaped1 = conv1.reshape(b, ph1, pool_size, pw1, pool_size)
+    flat1 = reshaped1.reshape(b, ph1, pw1, pool_size*pool_size)
+    max_idx1 = np.argmax(flat1, axis=-1)
+    max_h1 = max_idx1 // pool_size
+    max_w1 = max_idx1 % pool_size
 
-    # =====================================================================
-    # 10. Kernel1 Gradient (Same as Kernel2)
-    # ∂L/∂K1 = input ∗ ∂L/∂z1
-    # =====================================================================
-    dL_dkernel1 = np.zeros_like(kernels[0])
-    input_images = vals['z1']
-    kernel_size = kernels[0].shape[0]
+    d_conv1 = np.zeros_like(conv1)
+    batch_idx1 = np.repeat(np.arange(b), ph1*pw1)
+    h_idx1_flat = ((np.arange(ph1)[:, None]*pool_size) + max_h1).ravel()
+    w_idx1_flat = ((np.arange(pw1)[None, :]*pool_size) + max_w1).ravel()
+    flat_idx1 = np.ravel_multi_index((batch_idx1, h_idx1_flat, w_idx1_flat), conv1.shape)
+    d_conv1.ravel()[flat_idx1] = d_pool1.ravel()
 
-    for b in range(batch_size):
-        for i in range(h_p1 - kernel_size + 1):
-            for j in range(w_p1 - kernel_size + 1):
-                window = input_images[b, i:i+kernel_size, j:j+kernel_size]
-                dL_dkernel1 += window * dL_dconv1_pre_relu[b, i, j]
+ 
+    # 9. ReLU1 backward
+    print('good')
+    d_conv1_pre = d_conv1 * (conv1 > 0)
+    
 
-    # Average gradient over batch
-
-    dL_dkernel1 /= batch_size
+    # 10. Kernel1 gradient (conv1 weights)
+    print('good')
+    input_images = vals['z1']  # original input
+    k1 = kernels[0]
+    k_size1 = k1.shape[0]
+    windows1 = sliding_window_view(input_images, (k_size1,k_size1), axis=(1,2))
+    dK1 = np.einsum('bijkl,bij->kl', windows1, d_conv1_pre) / batch_size
+    
 
     # Return all gradients
-
-    gradients = {
-        'dW': dL_dW,
-        'db': dL_db,
-        'dkernel1': dL_dkernel1,
-        'dkernel2': dL_dkernel2
+    print('good')
+    return {
+        'dW': dW,
+        'db': db,
+        'dkernel1': dK1,
+        'dkernel2': dK2
     }
-    
-    return gradients
